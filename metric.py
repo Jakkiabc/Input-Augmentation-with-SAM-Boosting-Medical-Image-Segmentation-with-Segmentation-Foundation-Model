@@ -1,110 +1,97 @@
-import cv2
-import numpy as np
-import os
-from PIL import Image
-from sklearn.metrics import roc_curve,auc
+# -*- coding:utf-8 -*-
+# !/usr/bin/env python
+"""
+    @author: Zhongxi Qiu
+    @create time: 2021/4/13 11:09
+    @filename: metric.py
+    @software: PyCharm
+"""
 
-# #预测结果路径
-# pred_path = r'E:\Unet\DRIVE\test\SAM_1st_manual'
-# #标签路径
-# lab_path = r'E:\Unet\DRIVE\test\1st_manual'
+import torch
 
+from .confusion_matrix import confusion_matrix
 
-def tpcount(imgp,imgl):
-    n = 0
-    for i in range(WIDTH):
-        for j in range(HIGTH):
-            if imgp[i,j] == 255 and imgl[i,j] == 255:
-                n = n+1
-    return n
+class Metric:
+    def __init__(self, num_classes):
+        self.num_classes = num_classes
+        self.reset()
 
-def fncount (imgp,imgl):
-    n = 0
-    for i in range(WIDTH):
-        for j in range(HIGTH):
-            if imgl[i,j] == 255 and imgp[i,j] == 0:
-                n = n+1
-    return n
+    def reset(self):
+        num_classes = 2 if self.num_classes == 1 else self.num_classes
+        self.matrix = torch.zeros((num_classes, num_classes))
 
-def fpcount(imgp,imgl):
-    n = 0
-    for i in range(WIDTH):
-        for j in range(HIGTH):
-            if imgl[i,j] == 0 and imgp[i,j] == 255:
-                n+=1
-    return n
+    def update(self, output, target):
+        if (output.dim() == 4 or target.dim() == 2) and self.num_classes != 1:
+            output = torch.max(output, dim=1)[1]
+        if self.num_classes == 1:
+            output = torch.where(output >= 0.5, 1, 0)
+        num_classes = 2 if self.num_classes == 1 else self.num_classes
+        matrix = confusion_matrix(output.detach().cpu(), target.detach().cpu(), num_classes)
+        # if self.matrix.device != matrix.device:
+        #     self.matrix = self.matrix.to(matrix.device)
+        self.matrix += matrix.detach().cpu()
 
-def tncount(imgp,imgl):
-    n=0
-    for i in range(WIDTH):
-        for j in range(HIGTH):
-            if imgl[i,j] == 0 and imgp[i,j] == 0:
-                n += 1
-    return n
+    def evaluate(self):
+        result = dict()
+        FP = self.matrix.sum(0) - torch.diag(self.matrix)
+        FN = self.matrix.sum(1) - torch.diag(self.matrix)
+        TP = torch.diag(self.matrix)
+        TN = self.matrix.sum() - (FP + FN + TP)
+        precision = TP / (TP + FP)
+        acc = (TP + TN) / (TP+FP+FN+TN)
+        recall = TP / (TP + FN)
+        npv = TN/(TN+FN)
+        fnr = FN / (TP+FN)
+        fpr = FP / (FP+TN)
+        mcc = (TP*TN-FP*FN) / torch.sqrt((TP+FP)*(TP+FN)*(TN+FP)*(TN+FN))
+        # f1 =  2 * (precision * recall) / (precision + recall)
+        specficity = TN / (TN + FP)
+        iou = TP / (TP + FN +FP)
+        dice = (2*TP) / (2*TP + FN + FP)
+        result["FP"] = FP
+        result["FN"] = FN
+        result["TP"] = TP
+        result["TN"] = TN
+        result["precision"] = precision
+        result["acc"] = acc
+        result["dice"] = dice
+        result["specifity"] = specficity
+        result["iou"] = iou
+        result["recall"] = recall
+        result["mk"] = precision + npv - 1
+        result["npv"] = npv
+        result["mcc"] = mcc
+        result["bm"] = (recall+specficity - 1)
+        result["fnr"] = fnr
+        result["fpr"] = fpr
+        result["tpr"] = recall
+        result["tnr"] = specficity
+        return result
 
+class SeparateMetric:
+    def __init__(self, num_classes):
+        self.num_classes = num_classes
+        self.reset()
 
+    def reset(self):
+        self.ious = []
+        self.dices = []
 
+    def update(self, output, target):
+        if (output.dim() == 4 or target.dim() == 2) and self.num_classes != 1:
+            output = torch.max(output, dim=1)[1]
+        if self.num_classes == 1:
+            output = torch.where(output >= 0.5, 1, 0)
+        num_classes = 2 if self.num_classes == 1 else self.num_classes
+        matrix = confusion_matrix(output.detach().cpu(), target.detach().cpu(), num_classes)
+        FP = matrix.sum(0) - torch.diag(matrix)
+        FN = matrix.sum(1) - torch.diag(matrix)
+        TP = torch.diag(matrix)
+        TN = matrix.sum() - (FP + FN + TP)
+        iou = TP / (TP + FN + FP)
+        dice = (2 * TP) / (2 * TP + FN + FP)
+        self.ious.append(iou)
+        self.dices.append(dice)
 
-# imgs = os.listdir(pred_path)
-# a = len(imgs)
-TP = 0
-FN = 0
-FP = 0
-TN = 0
-c = 0
-
-root = r'/root/Unet/Unet/DRIVE/test/Aug_images'
-imgs_names = os.listdir(root)  # 读取图像的路径
-imgs_path = [os.path.join(root, name) for name in imgs_names]
-
-gt_mask_root = r'/root/Unet/Unet/DRIVE/test/1st_manual'
-gt_mask_names = os.listdir(gt_mask_root)  # 读取图像的路径
-gt_mask_path = [os.path.join(gt_mask_root, name) for name in gt_mask_names]
-
-for i in range(len(imgs_path)):
-
-    imgp = Image.open(imgs_path[i])
-    imgp = np.array(imgp)
-
-    new_size = (584, 565)
-    imgp = np.resize(imgp, new_size).astype(np.uint8)
-
-    imgl = Image.open(gt_mask_path[i])
-    imgl = np.array(imgl)
-
-    WIDTH = imgl.shape[0]
-    HIGTH = imgl.shape[1]
-
-    TP += tpcount(imgp, imgl)
-    FN += fncount(imgp, imgl)
-    FP += fpcount(imgp, imgl)
-    TN += tncount(imgp, imgl)
-
-    #3c += 1
-    #print('已经计算：'+str(c) + ',剩余数目：'+str(a-c))
-
-# print('TP:'+str(TP))
-# print('FN:'+str(FN))
-# print('FP:'+str(FP))
-# print('TN:'+str(TN))
-
-
-#准确率
-acc = (int(TN)+int(TP))/(int(WIDTH)*int(HIGTH)*int(len(imgs_path)))
-#精确率
-precision = int(TP)/(int(TP)+int(FP))
-#召回率
-recall = int(TP)/(int(TP)+int(FN))
-#F1
-f1 = int(TP)*2/(int(TP)*2+int(FN)+int(FP))
-# FPR
-FPR = int(FP)/(int(FP)+int(TN))
-# TPR
-TPR = int(TP)/(int(TP)+int(FN))
-
-
-print('acc：'+ str(acc))
-print('precision：'+ str(precision))
-print('recall：'+ str(recall))
-print('F1值：'+ str(f1))
-
+    def evaluate(self):
+        return self.dices, self.ious
